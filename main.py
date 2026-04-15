@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import suppress
 
@@ -61,7 +62,7 @@ def detect_role(tg_id: int) -> str:
     if tg_id in settings.admins:
         return "admin"
 
-    user = sheets.find_one("Users", "tg_id", str(tg_id))
+    user = sheets.get_user_by_tg_id(tg_id)
     if user:
         return str(user.get("role", "client")).strip() or "client"
 
@@ -85,10 +86,7 @@ def main_menu(role: str = "client") -> ReplyKeyboardMarkup:
 
     rows.append([KeyboardButton(text=f"📞 Алоқа: {settings.contact_phone}")])
 
-    return ReplyKeyboardMarkup(
-        keyboard=rows,
-        resize_keyboard=True,
-    )
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
 def phone_keyboard() -> ReplyKeyboardMarkup:
@@ -172,6 +170,11 @@ def ensure_user_exists(user: types.User) -> str:
     return role
 
 
+def touch_user_if_exists(user: types.User) -> None:
+    with suppress(Exception):
+        sheets.touch_user(user.id)
+
+
 def request_agent_registration(user: types.User) -> str:
     existing = sheets.find_one("Agents", "tg_id", str(user.id))
     if existing:
@@ -200,13 +203,13 @@ async def send_agent_request_to_admins(user: types.User):
         f"🆔 <code>{user.id}</code>\n"
         f"🔗 {normalize_username(user.username) or '-'}"
     )
-    for admin_id in settings.admins:
-        with suppress(Exception):
-            await bot.send_message(
-                admin_id,
-                text,
-                reply_markup=agent_request_kb(user.id),
-            )
+
+    tasks = [
+        bot.send_message(admin_id, text, reply_markup=agent_request_kb(user.id))
+        for admin_id in settings.admins
+    ]
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def notify_lead_to_agents_and_admins(lead_id: str) -> None:
@@ -222,45 +225,40 @@ async def notify_lead_to_agents_and_admins(lead_id: str) -> None:
         if tg_id.isdigit():
             recipients.add(int(tg_id))
 
+    tasks = []
+
     group_id = sheets.get_setting("AGENTS_GROUP_ID")
     if group_id and str(group_id).startswith("-100"):
-        with suppress(Exception):
-            await bot.send_message(
+        tasks.append(
+            bot.send_message(
                 int(group_id),
                 text,
                 reply_markup=lead_actions_kb(lead_id),
             )
+        )
 
     for chat_id in recipients:
-        with suppress(Exception):
-            await bot.send_message(
+        tasks.append(
+            bot.send_message(
                 chat_id,
                 text,
                 reply_markup=lead_actions_kb(lead_id),
             )
+        )
+
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def get_stats_text() -> str:
-    leads = sheets.get_all_records("Leads")
-    agents = sheets.get_all_records("Agents")
-
-    today = now_str()[:10]
-    month = now_str()[:7]
-
-    daily = [x for x in leads if str(x.get("created_at", "")).startswith(today)]
-    monthly = [x for x in leads if str(x.get("created_at", "")).startswith(month)]
-    active_agents = [x for x in agents if str(x.get("is_active", "")).upper() == "TRUE"]
-
-    daily_done = [x for x in daily if x.get("lead_status") in {"done", "contract_signed"}]
-    monthly_done = [x for x in monthly if x.get("lead_status") in {"done", "contract_signed"}]
-
+    stats = sheets.get_stats_summary()
     return (
         "📊 <b>Админ статистика</b>\n\n"
-        f"🧑‍💼 Актив агентлар: {len(active_agents)}\n\n"
-        f"📅 Кунлик лидлар: {len(daily)}\n"
-        f"🏁 Кунлик якунланган: {len(daily_done)}\n\n"
-        f"🗓 Ойлик лидлар: {len(monthly)}\n"
-        f"🏁 Ойлик якунланган: {len(monthly_done)}"
+        f"🧑‍💼 Актив агентлар: {stats['active_agents']}\n\n"
+        f"📅 Кунлик лидлар: {stats['daily']}\n"
+        f"🏁 Кунлик якунланган: {stats['daily_done']}\n\n"
+        f"🗓 Ойлик лидлар: {stats['monthly']}\n"
+        f"🏁 Ойлик якунланган: {stats['monthly_done']}"
     )
 
 
@@ -288,7 +286,6 @@ async def telegram_webhook(secret_path: str, request: Request):
 @dp.message(CommandStart())
 async def start_handler(message: Message, state: FSMContext):
     await state.clear()
-
     role = ensure_user_exists(message.from_user)
 
     await message.answer(
@@ -310,7 +307,7 @@ async def agent_request_command(message: Message):
     await message.answer(result, reply_markup=main_menu("client"))
 
     if "Сўров юборилди" in result:
-        await send_agent_request_to_admins(message.from_user)
+        asyncio.create_task(send_agent_request_to_admins(message.from_user))
 
 
 @dp.message(F.text == "🧑‍💼 Агент бўлиш")
@@ -324,7 +321,7 @@ async def agent_request_button(message: Message):
     await message.answer(result, reply_markup=main_menu("client"))
 
     if "Сўров юборилди" in result:
-        await send_agent_request_to_admins(message.from_user)
+        asyncio.create_task(send_agent_request_to_admins(message.from_user))
 
 
 @dp.message(F.text == "➕ Агент қўшиш")
@@ -354,7 +351,9 @@ async def request_handler(message: Message, state: FSMContext):
 
 @dp.message(F.text == "🏠 Объект қўшиш")
 async def add_property_handler(message: Message):
-    role = ensure_user_exists(message.from_user)
+    role = detect_role(message.from_user.id)
+    touch_user_if_exists(message.from_user)
+
     if role not in {"agent", "admin", "special_agent"}:
         await message.answer("Бу функция фақат агент ва админ учун.")
         return
@@ -367,7 +366,9 @@ async def add_property_handler(message: Message):
 
 @dp.message(F.text == "📊 Админ статистика")
 async def stats_handler(message: Message):
-    role = ensure_user_exists(message.from_user)
+    role = detect_role(message.from_user.id)
+    touch_user_if_exists(message.from_user)
+
     if role != "admin":
         await message.answer("Бу бўлим фақат админ учун.")
         return
@@ -444,7 +445,7 @@ async def notes_handler(message: Message, state: FSMContext):
         reply_markup=main_menu(role),
     )
 
-    await notify_lead_to_agents_and_admins(lead_id)
+    asyncio.create_task(notify_lead_to_agents_and_admins(lead_id))
 
 
 @dp.callback_query(F.data == "locked")
@@ -460,7 +461,7 @@ async def approve_agent_handler(callback: CallbackQuery):
 
     tg_id = callback.data.split(":", 1)[1]
     existing = sheets.find_one("Agents", "tg_id", tg_id)
-    user = sheets.find_one("Users", "tg_id", tg_id)
+    user = sheets.get_user_by_tg_id(tg_id)
 
     sheets.upsert_agent(
         tg_id=int(tg_id),
@@ -600,7 +601,7 @@ async def reject_handler(callback: CallbackQuery):
     )
 
     await callback.answer("Лид қайта очилди")
-    await notify_lead_to_agents_and_admins(lead_id)
+    asyncio.create_task(notify_lead_to_agents_and_admins(lead_id))
 
 
 @dp.callback_query(F.data.startswith("done:"))
