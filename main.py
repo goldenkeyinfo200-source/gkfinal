@@ -318,17 +318,6 @@ async def telegram_webhook(secret_path: str, request: Request):
     return {"ok": True}
 
 
-@dp.message(CommandStart())
-async def start_handler(message: Message, state: FSMContext):
-    await state.clear()
-
-    role = ensure_user_exists(message.from_user)
-
-    await message.answer(
-        f"Ассалому алайкум, <b>{message.from_user.full_name}</b>!\n\n"
-        f"{settings.company_name} ботга хуш келибсиз.",
-        reply_markup=main_menu(role),
-    )
 
 
 @dp.message(Command("agent"))
