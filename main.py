@@ -61,10 +61,6 @@ def detect_role(tg_id: int) -> str:
     if tg_id in settings.admins:
         return "admin"
 
-    agent = sheets.find_one("Agents", "tg_id", str(tg_id))
-    if agent and str(agent.get("is_active", "")).upper() == "TRUE":
-        return str(agent.get("role", "agent")).strip() or "agent"
-
     user = sheets.find_one("Users", "tg_id", str(tg_id))
     if user:
         return str(user.get("role", "client")).strip() or "client"
@@ -77,6 +73,9 @@ def main_menu(role: str = "client") -> ReplyKeyboardMarkup:
 
     if role == "client":
         rows.append([KeyboardButton(text="🧑‍💼 Агент бўлиш")])
+
+    if role == "admin":
+        rows.append([KeyboardButton(text="➕ Агент қўшиш")])
 
     if role in {"agent", "admin", "special_agent"}:
         rows.append([KeyboardButton(text="🏠 Объект қўшиш")])
@@ -94,9 +93,7 @@ def main_menu(role: str = "client") -> ReplyKeyboardMarkup:
 
 def phone_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📞 Телефон юбориш", request_contact=True)]
-        ],
+        keyboard=[[KeyboardButton(text="📞 Телефон юбориш", request_contact=True)]],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
@@ -330,6 +327,24 @@ async def agent_request_button(message: Message):
         await send_agent_request_to_admins(message.from_user)
 
 
+@dp.message(F.text == "➕ Агент қўшиш")
+async def add_agent_menu_handler(message: Message):
+    role = ensure_user_exists(message.from_user)
+    if role != "admin":
+        await message.answer("Бу функция фақат админ учун.")
+        return
+
+    await message.answer(
+        "🧑‍💼 Агент қўшиш учун номзод ботга /start босиб кирсин.\n\n"
+        "Кейин у:\n"
+        "1) <b>🧑‍💼 Агент бўлиш</b> ни босади\n"
+        "2) сизга тасдиқ сўрови келади\n"
+        "3) сиз <b>✅ Тасдиқлаш</b> ни босасиз\n\n"
+        "Шунда у автомат агент бўлади.",
+        reply_markup=main_menu("admin"),
+    )
+
+
 @dp.message(F.text == "📝 Заявка қолдириш")
 async def request_handler(message: Message, state: FSMContext):
     ensure_user_exists(message.from_user)
@@ -344,7 +359,10 @@ async def add_property_handler(message: Message):
         await message.answer("Бу функция фақат агент ва админ учун.")
         return
 
-    await message.answer("🏠 Объект қўшиш функцияси кейинги босқичда тўлиқ уланади.", reply_markup=main_menu(role))
+    await message.answer(
+        "🏠 Объект қўшиш функцияси кейинги босқичда тўлиқ уланади.",
+        reply_markup=main_menu(role),
+    )
 
 
 @dp.message(F.text == "📊 Админ статистика")
