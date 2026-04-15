@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Any
 
 import gspread
+from gspread.exceptions import APIError
 from oauth2client.service_account import ServiceAccountCredentials
 
 from config import settings
@@ -12,6 +13,37 @@ DATE_FMT = "%Y-%m-%d %H:%M:%S"
 
 def now_str() -> str:
     return datetime.now().strftime(DATE_FMT)
+
+
+def col_to_letter(col_num: int) -> str:
+    result = ""
+    while col_num > 0:
+        col_num, rem = divmod(col_num - 1, 26)
+        result = chr(65 + rem) + result
+    return result
+
+
+class TTLCache:
+    def __init__(self):
+        self._data: dict[str, tuple[float, Any]] = {}
+
+    def get(self, key: str, ttl: float):
+        item = self._data.get(key)
+        if not item:
+            return None
+        created_at, value = item
+        if time.time() - created_at > ttl:
+            self._data.pop(key, None)
+            return None
+        return value
+
+    def set(self, key: str, value: Any):
+        self._data[key] = (time.time(), value)
+
+    def delete_prefix(self, prefix: str):
+        for key in list(self._data.keys()):
+            if key.startswith(prefix):
+                self._data.pop(key, None)
 
 
 class GoogleSheetsService:
@@ -25,56 +57,90 @@ class GoogleSheetsService:
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 
         self.gc = gspread.authorize(creds)
-        self.sheet_id = settings.google_sheet_id
-        self.sh = self.gc.open_by_key(self.sheet_id)
+        self.sh = self.gc.open_by_key(settings.google_sheet_id)
 
-        self._settings_cache: dict[str, str] = {}
-        self._settings_cache_time = 0.0
+        self.cache = TTLCache()
+        self._last_touch_by_user: dict[str, float] = {}
 
-        self._agents_cache: list[dict[str, Any]] = []
-        self._agents_cache_time = 0.0
-
-        self._users_cache: dict[str, dict[str, Any]] = {}
-        self._users_cache_time = 0.0
-
-        self._stats_cache: dict[str, int] = {}
-        self._stats_cache_time = 0.0
+    def _with_retry(self, fn, *args, **kwargs):
+        last_error = None
+        for delay in (0, 0.5, 1.0, 2.0):
+            if delay:
+                time.sleep(delay)
+            try:
+                return fn(*args, **kwargs)
+            except APIError as e:
+                last_error = e
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                if status not in (429, 500, 502, 503, 504):
+                    raise
+        raise last_error
 
     def worksheet(self, name: str):
-        return self.sh.worksheet(name)
+        cache_key = f"ws:{name}"
+        ws = self.cache.get(cache_key, ttl=300)
+        if ws is not None:
+            return ws
+        ws = self._with_retry(self.sh.worksheet, name)
+        self.cache.set(cache_key, ws)
+        return ws
 
     def get_headers(self, sheet_name: str) -> list[str]:
+        cache_key = f"headers:{sheet_name}"
+        headers = self.cache.get(cache_key, ttl=300)
+        if headers is not None:
+            return headers
         ws = self.worksheet(sheet_name)
-        return [str(x).strip() for x in ws.row_values(1)]
+        headers = [str(x).strip() for x in self._with_retry(ws.row_values, 1)]
+        self.cache.set(cache_key, headers)
+        return headers
 
-    def get_all_records(self, sheet_name: str) -> list[dict[str, Any]]:
+    def get_all_values(self, sheet_name: str, ttl: float = 5.0) -> list[list[str]]:
+        cache_key = f"values:{sheet_name}"
+        values = self.cache.get(cache_key, ttl=ttl)
+        if values is not None:
+            return values
         ws = self.worksheet(sheet_name)
+        values = self._with_retry(ws.get_all_values)
+        self.cache.set(cache_key, values)
+        return values
+
+    def get_all_records(self, sheet_name: str, ttl: float = 5.0) -> list[dict[str, Any]]:
+        cache_key = f"records:{sheet_name}"
+        cached = self.cache.get(cache_key, ttl=ttl)
+        if cached is not None:
+            return cached
+
         headers = self.get_headers(sheet_name)
-        rows = ws.get_all_values()
+        rows = self.get_all_values(sheet_name, ttl=ttl)
 
         items: list[dict[str, Any]] = []
-        for idx, row in enumerate(rows[1:], start=2):
+        for row_index, row in enumerate(rows[1:], start=2):
             obj: dict[str, Any] = {}
             for i, h in enumerate(headers):
                 obj[h] = row[i] if i < len(row) else ""
-            obj["__row"] = idx
+            obj["__row"] = row_index
             items.append(obj)
 
+        self.cache.set(cache_key, items)
         return items
 
-    def _invalidate_cache(self, sheet_name: str) -> None:
+    def invalidate_sheet_cache(self, sheet_name: str):
+        self.cache.delete_prefix(f"values:{sheet_name}")
+        self.cache.delete_prefix(f"records:{sheet_name}")
+
         if sheet_name == "Settings":
-            self._settings_cache_time = 0.0
-        elif sheet_name == "Agents":
-            self._agents_cache_time = 0.0
+            self.cache.delete_prefix("settings_map")
         elif sheet_name == "Users":
-            self._users_cache_time = 0.0
+            self.cache.delete_prefix("users_map")
+        elif sheet_name == "Agents":
+            self.cache.delete_prefix("agents_active")
         elif sheet_name == "Leads":
-            self._stats_cache_time = 0.0
+            self.cache.delete_prefix("stats_summary")
 
     def find_one(self, sheet_name: str, column: str, value: Any) -> dict[str, Any] | None:
         target = str(value).strip()
-        for row in self.get_all_records(sheet_name):
+        for row in self.get_all_records(sheet_name, ttl=5.0):
             if str(row.get(column, "")).strip() == target:
                 return row
         return None
@@ -83,9 +149,9 @@ class GoogleSheetsService:
         ws = self.worksheet(sheet_name)
         headers = self.get_headers(sheet_name)
         row = [row_data.get(h, "") for h in headers]
-        ws.append_row(row, value_input_option="USER_ENTERED")
-        self._invalidate_cache(sheet_name)
-        return len(ws.get_all_values())
+        self._with_retry(ws.append_row, row, value_input_option="USER_ENTERED")
+        self.invalidate_sheet_cache(sheet_name)
+        return len(self.get_all_values(sheet_name, ttl=0.1))
 
     def update_row_by_match(
         self,
@@ -100,42 +166,54 @@ class GoogleSheetsService:
 
         ws = self.worksheet(sheet_name)
         headers = self.get_headers(sheet_name)
-        row_index = row["__row"]
+        row_index = int(row["__row"])
 
+        new_row_values = [row.get(h, "") for h in headers]
         for key, value in fields.items():
             if key in headers:
-                col_index = headers.index(key) + 1
-                ws.update_cell(row_index, col_index, value)
+                new_row_values[headers.index(key)] = value
 
-        self._invalidate_cache(sheet_name)
+        end_col = col_to_letter(len(headers))
+        rng = f"A{row_index}:{end_col}{row_index}"
+        self._with_retry(ws.update, rng, [new_row_values], value_input_option="USER_ENTERED")
+        self.invalidate_sheet_cache(sheet_name)
         return True
 
+    def get_settings_map(self) -> dict[str, str]:
+        cache_key = "settings_map"
+        cached = self.cache.get(cache_key, ttl=60)
+        if cached is not None:
+            return cached
+
+        rows = self.get_all_records("Settings", ttl=10.0)
+        result = {
+            str(row.get("key", "")).strip(): str(row.get("value", "")).strip()
+            for row in rows
+            if str(row.get("key", "")).strip()
+        }
+        self.cache.set(cache_key, result)
+        return result
+
     def get_setting(self, key: str) -> str:
-        now = time.time()
+        return self.get_settings_map().get(key, "")
 
-        if now - self._settings_cache_time > 60:
-            rows = self.get_all_records("Settings")
-            self._settings_cache = {
-                str(row.get("key", "")).strip(): str(row.get("value", "")).strip()
-                for row in rows
-            }
-            self._settings_cache_time = now
+    def get_users_map(self) -> dict[str, dict[str, Any]]:
+        cache_key = "users_map"
+        cached = self.cache.get(cache_key, ttl=20)
+        if cached is not None:
+            return cached
 
-        return self._settings_cache.get(key, "")
+        rows = self.get_all_records("Users", ttl=10.0)
+        result = {
+            str(row.get("tg_id", "")).strip(): row
+            for row in rows
+            if str(row.get("tg_id", "")).strip()
+        }
+        self.cache.set(cache_key, result)
+        return result
 
     def get_user_by_tg_id(self, tg_id: int | str) -> dict[str, Any] | None:
-        now = time.time()
-
-        if now - self._users_cache_time > 30:
-            rows = self.get_all_records("Users")
-            self._users_cache = {
-                str(row.get("tg_id", "")).strip(): row
-                for row in rows
-                if str(row.get("tg_id", "")).strip()
-            }
-            self._users_cache_time = now
-
-        return self._users_cache.get(str(tg_id).strip())
+        return self.get_users_map().get(str(tg_id).strip())
 
     def upsert_user(
         self,
@@ -165,16 +243,25 @@ class GoogleSheetsService:
             self.append_row_by_headers("Users", payload)
 
     def touch_user(self, tg_id: int) -> None:
+        key = str(tg_id)
+        now = time.time()
+        last_touch = self._last_touch_by_user.get(key, 0)
+
+        if now - last_touch < 60:
+            return
+
         existing = self.get_user_by_tg_id(tg_id)
         if not existing:
             return
 
-        self.update_row_by_match(
+        ok = self.update_row_by_match(
             "Users",
             "tg_id",
             str(tg_id),
             {"last_seen_at": now_str()},
         )
+        if ok:
+            self._last_touch_by_user[key] = now
 
     def upsert_agent(
         self,
@@ -209,24 +296,25 @@ class GoogleSheetsService:
             self.append_row_by_headers("Agents", payload)
 
     def get_active_agents(self) -> list[dict[str, Any]]:
-        now = time.time()
+        cache_key = "agents_active"
+        cached = self.cache.get(cache_key, ttl=20)
+        if cached is not None:
+            return cached
 
-        if now - self._agents_cache_time > 30:
-            rows = self.get_all_records("Agents")
-            self._agents_cache = [
-                row for row in rows
-                if (
-                    str(row.get("is_active", "")).upper() == "TRUE"
-                    and str(row.get("can_take_leads", "")).upper() == "TRUE"
-                    and str(row.get("tg_id", "")).isdigit()
-                )
-            ]
-            self._agents_cache_time = now
-
-        return self._agents_cache
+        rows = self.get_all_records("Agents", ttl=10.0)
+        result = [
+            row for row in rows
+            if (
+                str(row.get("is_active", "")).upper() == "TRUE"
+                and str(row.get("can_take_leads", "")).upper() == "TRUE"
+                and str(row.get("tg_id", "")).isdigit()
+            )
+        ]
+        self.cache.set(cache_key, result)
+        return result
 
     def next_lead_id(self) -> str:
-        rows = self.get_all_records("Leads")
+        rows = self.get_all_records("Leads", ttl=10.0)
         max_num = 0
 
         for row in rows:
@@ -275,46 +363,39 @@ class GoogleSheetsService:
                 "notes": notes,
             },
         )
-
-        self._stats_cache_time = 0.0
         return lead_id
 
     def get_stats_summary(self) -> dict[str, int]:
-        now = time.time()
+        cache_key = "stats_summary"
+        cached = self.cache.get(cache_key, ttl=30)
+        if cached is not None:
+            return cached
 
-        if now - self._stats_cache_time > 60:
-            leads = self.get_all_records("Leads")
-            agents = self.get_all_records("Agents")
+        leads = self.get_all_records("Leads", ttl=10.0)
+        agents = self.get_all_records("Agents", ttl=10.0)
 
-            today = now_str()[:10]
-            month = now_str()[:7]
+        today = now_str()[:10]
+        month = now_str()[:7]
 
-            daily = [x for x in leads if str(x.get("created_at", "")).startswith(today)]
-            monthly = [x for x in leads if str(x.get("created_at", "")).startswith(month)]
-            active_agents = [
-                x for x in agents
-                if str(x.get("is_active", "")).upper() == "TRUE"
-            ]
+        daily = [x for x in leads if str(x.get("created_at", "")).startswith(today)]
+        monthly = [x for x in leads if str(x.get("created_at", "")).startswith(month)]
+        active_agents = [
+            x for x in agents
+            if str(x.get("is_active", "")).upper() == "TRUE"
+        ]
 
-            daily_done = [
-                x for x in daily
-                if x.get("lead_status") in {"done", "contract_signed"}
-            ]
-            monthly_done = [
-                x for x in monthly
-                if x.get("lead_status") in {"done", "contract_signed"}
-            ]
+        daily_done = [x for x in daily if x.get("lead_status") in {"done", "contract_signed"}]
+        monthly_done = [x for x in monthly if x.get("lead_status") in {"done", "contract_signed"}]
 
-            self._stats_cache = {
-                "active_agents": len(active_agents),
-                "daily": len(daily),
-                "daily_done": len(daily_done),
-                "monthly": len(monthly),
-                "monthly_done": len(monthly_done),
-            }
-            self._stats_cache_time = now
-
-        return self._stats_cache
+        result = {
+            "active_agents": len(active_agents),
+            "daily": len(daily),
+            "daily_done": len(daily_done),
+            "monthly": len(monthly),
+            "monthly_done": len(monthly_done),
+        }
+        self.cache.set(cache_key, result)
+        return result
 
 
 sheets = GoogleSheetsService()
