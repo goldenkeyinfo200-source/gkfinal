@@ -1,22 +1,19 @@
 import os
-import json
+
 
 class Settings:
     def __init__(self):
         self.bot_token = os.getenv("BOT_TOKEN")
-        self.base_webhook_url = os.getenv("BASE_WEBHOOK_URL")
+        self.base_webhook_url = os.getenv("BASE_WEBHOOK_URL", "").rstrip("/")
         self.webhook_secret = os.getenv("WEBHOOK_SECRET")
-
         self.google_sheet_id = os.getenv("GOOGLE_SHEET_ID")
-
-        self.admins = [int(x) for x in os.getenv("ADMINS", "").split(",") if x]
-
+        self.admins = [int(x) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
         self.company_name = os.getenv("COMPANY_NAME", "Golden Key")
         self.contact_phone = os.getenv("CONTACT_PHONE", "")
 
     @property
     def webhook_path(self):
-        return f"/webhook/{self.webhook_secret}"
+        return f"/{self.webhook_secret}"
 
     @property
     def webhook_url(self):
