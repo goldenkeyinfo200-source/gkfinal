@@ -86,7 +86,10 @@ def main_menu(role: str = "client") -> ReplyKeyboardMarkup:
 
     rows.append([KeyboardButton(text=f"📞 Алоқа: {settings.contact_phone}")])
 
-    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+    return ReplyKeyboardMarkup(
+        keyboard=rows,
+        resize_keyboard=True,
+    )
 
 
 def phone_keyboard() -> ReplyKeyboardMarkup:
@@ -677,6 +680,23 @@ async def contract_handler(callback: CallbackQuery):
                 int(client_tg_id),
                 "📄 Табриклаймиз! Сизнинг мурожаатингиз бўйича шартнома тузилди.",
             )
+
+
+@dp.message()
+async def fallback_message_handler(message: Message, state: FSMContext):
+    role = detect_role(message.from_user.id)
+    touch_user_if_exists(message.from_user)
+
+    await state.clear()
+    await message.answer(
+        "Буйруқ тушунарсиз ёки ҳозирги ҳолатга мос эмас.\nМенюдан танланг 👇",
+        reply_markup=main_menu(role),
+    )
+
+
+@dp.callback_query()
+async def fallback_callback_handler(callback: CallbackQuery):
+    await callback.answer("Бу тугма ҳозир фаол эмас ёки эски хабардан босилди.", show_alert=True)
 
 
 @app.on_event("startup")
