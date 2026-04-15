@@ -73,9 +73,7 @@ def detect_role(tg_id: int) -> str:
 
 
 def main_menu(role: str = "client") -> ReplyKeyboardMarkup:
-    rows = [
-        [KeyboardButton(text="📝 Заявка қолдириш")]
-    ]
+    rows = [[KeyboardButton(text="📝 Заявка қолдириш")]]
 
     if role == "client":
         rows.append([KeyboardButton(text="🧑‍💼 Агент бўлиш")])
@@ -112,7 +110,7 @@ def purpose_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def admin_approve_kb(tg_id: int):
+def agent_request_kb(tg_id: int):
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Тасдиқлаш", callback_data=f"approve_agent:{tg_id}")
     kb.button(text="❌ Рад қилиш", callback_data=f"reject_agent:{tg_id}")
@@ -125,6 +123,7 @@ def lead_actions_kb(lead_id: str):
     kb.button(text="✅ Олдим", callback_data=f"take:{lead_id}")
     kb.button(text="❌ Рад этдим", callback_data=f"reject:{lead_id}")
     kb.button(text="🏁 Бажарилди", callback_data=f"done:{lead_id}")
+    kb.button(text="📄 Шартнома тузилди", callback_data=f"contract:{lead_id}")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -160,25 +159,17 @@ def ensure_user_exists(user: types.User) -> str:
     )
 
     if user.id in settings.admins:
-        existing_agent = sheets.find_one("Agents", "tg_id", str(user.id))
-        payload = {
-            "tg_id": str(user.id),
-            "full_name": user.full_name,
-            "phone": "",
-            "username": normalize_username(user.username),
-            "role": "admin",
-            "is_active": "TRUE",
-            "can_take_leads": "TRUE",
-            "is_special_agent": "FALSE",
-            "registered_at": now_str(),
-            "notes": "auto-admin",
-        }
-
-        if existing_agent:
-            sheets.update_row_by_match("Agents", "tg_id", str(user.id), payload)
-        else:
-            sheets.append_row_by_headers("Agents", payload)
-
+        sheets.upsert_agent(
+            tg_id=user.id,
+            full_name=user.full_name,
+            phone="",
+            username=normalize_username(user.username),
+            role="admin",
+            is_active="TRUE",
+            can_take_leads="TRUE",
+            is_special_agent="FALSE",
+            notes="auto-admin",
+        )
         return "admin"
 
     return role
@@ -191,35 +182,17 @@ def request_agent_registration(user: types.User) -> str:
             return "Сиз аллақачон агентсиз."
         return "Сизнинг агент сўровингиз аллақачон юборилган."
 
-    sheets.append_row_by_headers(
-        "Agents",
-        {
-            "tg_id": str(user.id),
-            "full_name": user.full_name,
-            "phone": "",
-            "username": normalize_username(user.username),
-            "role": "agent",
-            "is_active": "FALSE",
-            "can_take_leads": "FALSE",
-            "is_special_agent": "FALSE",
-            "registered_at": now_str(),
-            "notes": "pending",
-        },
+    sheets.upsert_agent(
+        tg_id=user.id,
+        full_name=user.full_name,
+        phone="",
+        username=normalize_username(user.username),
+        role="agent",
+        is_active="FALSE",
+        can_take_leads="FALSE",
+        is_special_agent="FALSE",
+        notes="pending",
     )
-
-    text = (
-        "🧑‍💼 <b>Янги агент сўрови</b>\n\n"
-        f"👤 {user.full_name}\n"
-        f"🆔 <code>{user.id}</code>\n"
-        f"🔗 {normalize_username(user.username) or '-'}"
-    )
-
-    for admin_id in settings.admins:
-        with suppress(Exception):
-            bot_loop_message = text
-            # sent async outside sync block handled in caller
-            pass
-
     return "Сўров юборилди. Админ тасдиғидан кейин агент бўласиз."
 
 
@@ -235,7 +208,7 @@ async def send_agent_request_to_admins(user: types.User):
             await bot.send_message(
                 admin_id,
                 text,
-                reply_markup=admin_approve_kb(user.id),
+                reply_markup=agent_request_kb(user.id),
             )
 
 
@@ -279,13 +252,10 @@ def get_stats_text() -> str:
 
     daily = [x for x in leads if str(x.get("created_at", "")).startswith(today)]
     monthly = [x for x in leads if str(x.get("created_at", "")).startswith(month)]
-    active_agents = [
-        x for x in agents
-        if str(x.get("is_active", "")).upper() == "TRUE"
-    ]
+    active_agents = [x for x in agents if str(x.get("is_active", "")).upper() == "TRUE"]
 
-    daily_done = [x for x in daily if x.get("lead_status") == "done"]
-    monthly_done = [x for x in monthly if x.get("lead_status") == "done"]
+    daily_done = [x for x in daily if x.get("lead_status") in {"done", "contract_signed"}]
+    monthly_done = [x for x in monthly if x.get("lead_status") in {"done", "contract_signed"}]
 
     return (
         "📊 <b>Админ статистика</b>\n\n"
@@ -318,6 +288,18 @@ async def telegram_webhook(secret_path: str, request: Request):
     return {"ok": True}
 
 
+@dp.message(CommandStart())
+async def start_handler(message: Message, state: FSMContext):
+    await state.clear()
+
+    role = ensure_user_exists(message.from_user)
+
+    await message.answer(
+        f"🏠 <b>{settings.company_name}</b>\n\n"
+        f"Салом, {message.from_user.full_name}!\n"
+        f"Менюдан танланг 👇",
+        reply_markup=main_menu(role),
+    )
 
 
 @dp.message(Command("agent"))
@@ -352,10 +334,7 @@ async def agent_request_button(message: Message):
 async def request_handler(message: Message, state: FSMContext):
     ensure_user_exists(message.from_user)
     await state.set_state(LeadForm.full_name)
-    await message.answer(
-        "Исмингизни киритинг:",
-        reply_markup=ReplyKeyboardRemove(),
-    )
+    await message.answer("Исмингизни киритинг:", reply_markup=ReplyKeyboardRemove())
 
 
 @dp.message(F.text == "🏠 Объект қўшиш")
@@ -365,7 +344,7 @@ async def add_property_handler(message: Message):
         await message.answer("Бу функция фақат агент ва админ учун.")
         return
 
-    await message.answer("🏠 Объект қўшиш функцияси кейинги босқичда тўлиқ уланади.")
+    await message.answer("🏠 Объект қўшиш функцияси кейинги босқичда тўлиқ уланади.", reply_markup=main_menu(role))
 
 
 @dp.message(F.text == "📊 Админ статистика")
@@ -382,10 +361,7 @@ async def stats_handler(message: Message):
 async def full_name_handler(message: Message, state: FSMContext):
     await state.update_data(full_name=(message.text or "").strip())
     await state.set_state(LeadForm.phone)
-    await message.answer(
-        "Телефон рақамингизни юборинг ёки ёзинг:",
-        reply_markup=phone_keyboard(),
-    )
+    await message.answer("Телефон рақамингизни юборинг ёки ёзинг:", reply_markup=phone_keyboard())
 
 
 @dp.message(LeadForm.phone, F.contact)
@@ -393,10 +369,7 @@ async def phone_contact_handler(message: Message, state: FSMContext):
     phone = normalize_phone(message.contact.phone_number or "")
     await state.update_data(phone=phone)
     await state.set_state(LeadForm.purpose)
-    await message.answer(
-        "Мақсадни танланг:",
-        reply_markup=purpose_keyboard(),
-    )
+    await message.answer("Мақсадни танланг:", reply_markup=purpose_keyboard())
 
 
 @dp.message(LeadForm.phone)
@@ -404,40 +377,37 @@ async def phone_text_handler(message: Message, state: FSMContext):
     phone = normalize_phone(message.text or "")
     await state.update_data(phone=phone)
     await state.set_state(LeadForm.purpose)
-    await message.answer(
-        "Мақсадни танланг:",
-        reply_markup=purpose_keyboard(),
-    )
+    await message.answer("Мақсадни танланг:", reply_markup=purpose_keyboard())
 
 
 @dp.message(LeadForm.purpose)
 async def purpose_handler(message: Message, state: FSMContext):
     if message.text not in PURPOSE_OPTIONS:
-        await message.answer(
-            "Рўйхатдан биттасини танланг:",
-            reply_markup=purpose_keyboard(),
-        )
+        await message.answer("Рўйхатдан биттасини танланг:", reply_markup=purpose_keyboard())
         return
 
     await state.update_data(purpose=message.text)
     await state.set_state(LeadForm.notes)
-    await message.answer(
-        "Қўшимча изоҳ ёзинг:",
-        reply_markup=ReplyKeyboardRemove(),
-    )
+    await message.answer("Қўшимча изоҳ ёзинг:", reply_markup=ReplyKeyboardRemove())
 
 
-@dp.message(CommandStart())
-async def start_handler(message: Message, state: FSMContext):
-    await state.clear()
+@dp.message(LeadForm.notes)
+async def notes_handler(message: Message, state: FSMContext):
+    data = await state.get_data()
 
+    full_name = data.get("full_name") or message.from_user.full_name
+    phone = data.get("phone", "")
+    purpose = data.get("purpose", "")
+    notes = (message.text or "").strip()
+    username = normalize_username(message.from_user.username)
     role = ensure_user_exists(message.from_user)
 
-    await message.answer(
-        f"🏠 <b>{settings.company_name}</b>\n\n"
-        f"Салом, {message.from_user.full_name}!\n"
-        f"Менюдан танланг 👇",
-        reply_markup=main_menu(role)
+    sheets.upsert_user(
+        tg_id=message.from_user.id,
+        full_name=full_name,
+        phone=phone,
+        username=username,
+        role="client" if role == "client" else role,
     )
 
     lead_id = sheets.create_lead(
@@ -474,23 +444,17 @@ async def approve_agent_handler(callback: CallbackQuery):
     existing = sheets.find_one("Agents", "tg_id", tg_id)
     user = sheets.find_one("Users", "tg_id", tg_id)
 
-    payload = {
-        "tg_id": tg_id,
-        "full_name": (user or {}).get("full_name", existing.get("full_name", "") if existing else ""),
-        "phone": (user or {}).get("phone", existing.get("phone", "") if existing else ""),
-        "username": (user or {}).get("username", existing.get("username", "") if existing else ""),
-        "role": "agent",
-        "is_active": "TRUE",
-        "can_take_leads": "TRUE",
-        "is_special_agent": "FALSE",
-        "registered_at": existing.get("registered_at", now_str()) if existing else now_str(),
-        "notes": "approved",
-    }
-
-    if existing:
-        sheets.update_row_by_match("Agents", "tg_id", tg_id, payload)
-    else:
-        sheets.append_row_by_headers("Agents", payload)
+    sheets.upsert_agent(
+        tg_id=int(tg_id),
+        full_name=(user or {}).get("full_name", existing.get("full_name", "") if existing else ""),
+        phone=(user or {}).get("phone", existing.get("phone", "") if existing else ""),
+        username=(user or {}).get("username", existing.get("username", "") if existing else ""),
+        role="agent",
+        is_active="TRUE",
+        can_take_leads="TRUE",
+        is_special_agent="FALSE",
+        notes="approved",
+    )
 
     sheets.update_row_by_match("Users", "tg_id", tg_id, {"role": "agent"})
 
@@ -655,6 +619,44 @@ async def done_handler(callback: CallbackQuery):
             await bot.send_message(
                 int(client_tg_id),
                 "🏁 Сизнинг мурожаатингиз якунланди. Раҳмат.",
+            )
+
+
+@dp.callback_query(F.data.startswith("contract:"))
+async def contract_handler(callback: CallbackQuery):
+    lead_id = callback.data.split(":", 1)[1]
+    lead = sheets.find_one("Leads", "lead_id", lead_id)
+
+    if not lead:
+        await callback.answer("Лид топилмади", show_alert=True)
+        return
+
+    assigned_to = str(lead.get("assigned_to_tg_id", "")).strip()
+    is_admin = detect_role(callback.from_user.id) == "admin"
+
+    if assigned_to != str(callback.from_user.id) and not is_admin:
+        await callback.answer("Фақат лидни олган ходим шартнома қила олади", show_alert=True)
+        return
+
+    sheets.update_row_by_match(
+        "Leads",
+        "lead_id",
+        lead_id,
+        {
+            "lead_status": "contract_signed",
+            "finished_at": now_str(),
+            "result": "contract_signed",
+        },
+    )
+
+    await callback.answer("Шартнома тузилди")
+
+    client_tg_id = str(lead.get("client_tg_id", "")).strip()
+    if client_tg_id.isdigit():
+        with suppress(Exception):
+            await bot.send_message(
+                int(client_tg_id),
+                "📄 Табриклаймиз! Сизнинг мурожаатингиз бўйича шартнома тузилди.",
             )
 
 

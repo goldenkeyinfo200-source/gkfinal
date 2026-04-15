@@ -1,6 +1,5 @@
-aiogram
+aiogram==3.7.0
 fastapi
 uvicorn
 gspread
-google-auth
-python-dotenv
+oauth2client
