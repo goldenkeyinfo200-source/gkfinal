@@ -37,7 +37,7 @@ class GoogleSheetsService:
         self._users_cache: dict[str, dict[str, Any]] = {}
         self._users_cache_time = 0.0
 
-        self._stats_cache: dict[str, Any] = {}
+        self._stats_cache: dict[str, int] = {}
         self._stats_cache_time = 0.0
 
     def worksheet(self, name: str):
@@ -51,8 +51,8 @@ class GoogleSheetsService:
         ws = self.worksheet(sheet_name)
         headers = self.get_headers(sheet_name)
         rows = ws.get_all_values()
-        items: list[dict[str, Any]] = []
 
+        items: list[dict[str, Any]] = []
         for idx, row in enumerate(rows[1:], start=2):
             obj: dict[str, Any] = {}
             for i, h in enumerate(headers):
@@ -78,33 +78,6 @@ class GoogleSheetsService:
             if str(row.get(column, "")).strip() == target:
                 return row
         return None
-
-    def get_setting(self, key: str) -> str:
-        now = time.time()
-
-        if now - self._settings_cache_time > 60:
-            rows = self.get_all_records("Settings")
-            self._settings_cache = {
-                str(row.get("key", "")).strip(): str(row.get("value", "")).strip()
-                for row in rows
-            }
-            self._settings_cache_time = now
-
-        return self._settings_cache.get(key, "")
-
-    def get_user_by_tg_id(self, tg_id: int | str) -> dict[str, Any] | None:
-        now = time.time()
-
-        if now - self._users_cache_time > 30:
-            rows = self.get_all_records("Users")
-            self._users_cache = {
-                str(row.get("tg_id", "")).strip(): row
-                for row in rows
-                if str(row.get("tg_id", "")).strip()
-            }
-            self._users_cache_time = now
-
-        return self._users_cache.get(str(tg_id).strip())
 
     def append_row_by_headers(self, sheet_name: str, row_data: dict[str, Any]) -> int:
         ws = self.worksheet(sheet_name)
@@ -136,6 +109,33 @@ class GoogleSheetsService:
 
         self._invalidate_cache(sheet_name)
         return True
+
+    def get_setting(self, key: str) -> str:
+        now = time.time()
+
+        if now - self._settings_cache_time > 60:
+            rows = self.get_all_records("Settings")
+            self._settings_cache = {
+                str(row.get("key", "")).strip(): str(row.get("value", "")).strip()
+                for row in rows
+            }
+            self._settings_cache_time = now
+
+        return self._settings_cache.get(key, "")
+
+    def get_user_by_tg_id(self, tg_id: int | str) -> dict[str, Any] | None:
+        now = time.time()
+
+        if now - self._users_cache_time > 30:
+            rows = self.get_all_records("Users")
+            self._users_cache = {
+                str(row.get("tg_id", "")).strip(): row
+                for row in rows
+                if str(row.get("tg_id", "")).strip()
+            }
+            self._users_cache_time = now
+
+        return self._users_cache.get(str(tg_id).strip())
 
     def upsert_user(
         self,
@@ -292,7 +292,8 @@ class GoogleSheetsService:
             daily = [x for x in leads if str(x.get("created_at", "")).startswith(today)]
             monthly = [x for x in leads if str(x.get("created_at", "")).startswith(month)]
             active_agents = [
-                x for x in agents if str(x.get("is_active", "")).upper() == "TRUE"
+                x for x in agents
+                if str(x.get("is_active", "")).upper() == "TRUE"
             ]
 
             daily_done = [
