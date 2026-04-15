@@ -4,6 +4,8 @@ from typing import Any
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
+from config import settings
+
 DATE_FMT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -17,9 +19,12 @@ class GoogleSheetsService:
             "https://spreadsheets.google.com/feeds",
             "https://www.googleapis.com/auth/drive",
         ]
-        creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+
+        creds_dict = settings.google_credentials_dict
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+
         self.gc = gspread.authorize(creds)
-        self.sheet_id = "1UWZlRY3kB0mZKfd9vDDJhV7DYKH2CIR74GM-qnnc9dI"
+        self.sheet_id = settings.google_sheet_id
         self.sh = self.gc.open_by_key(self.sheet_id)
 
     def worksheet(self, name: str):
@@ -33,10 +38,10 @@ class GoogleSheetsService:
         ws = self.worksheet(sheet_name)
         headers = self.get_headers(sheet_name)
         rows = ws.get_all_values()
-        items = []
+        items: list[dict[str, Any]] = []
 
         for idx, row in enumerate(rows[1:], start=2):
-            obj = {}
+            obj: dict[str, Any] = {}
             for i, h in enumerate(headers):
                 obj[h] = row[i] if i < len(row) else ""
             obj["__row"] = idx
@@ -45,9 +50,9 @@ class GoogleSheetsService:
         return items
 
     def find_one(self, sheet_name: str, column: str, value: Any) -> dict[str, Any] | None:
-        value = str(value).strip()
+        target = str(value).strip()
         for row in self.get_all_records(sheet_name):
-            if str(row.get(column, "")).strip() == value:
+            if str(row.get(column, "")).strip() == target:
                 return row
         return None
 
@@ -157,6 +162,7 @@ class GoogleSheetsService:
     def next_lead_id(self) -> str:
         rows = self.get_all_records("Leads")
         max_num = 0
+
         for row in rows:
             lead_id = str(row.get("lead_id", "")).strip()
             if lead_id.startswith("LD-"):
@@ -164,6 +170,7 @@ class GoogleSheetsService:
                     max_num = max(max_num, int(lead_id.split("-")[1]))
                 except Exception:
                     pass
+
         return f"LD-{max_num + 1:03d}"
 
     def create_lead(
@@ -202,6 +209,7 @@ class GoogleSheetsService:
                 "notes": notes,
             },
         )
+
         return lead_id
 
 
