@@ -1,3 +1,4 @@
+import time
 from datetime import datetime
 from typing import Any
 
@@ -26,6 +27,12 @@ class GoogleSheetsService:
         self.gc = gspread.authorize(creds)
         self.sheet_id = settings.google_sheet_id
         self.sh = self.gc.open_by_key(self.sheet_id)
+
+        self._settings_cache: dict[str, str] = {}
+        self._settings_cache_time = 0.0
+
+        self._agents_cache: list[dict[str, Any]] = []
+        self._agents_cache_time = 0.0
 
     def worksheet(self, name: str):
         return self.sh.worksheet(name)
@@ -61,6 +68,12 @@ class GoogleSheetsService:
         headers = self.get_headers(sheet_name)
         row = [row_data.get(h, "") for h in headers]
         ws.append_row(row, value_input_option="USER_ENTERED")
+
+        if sheet_name == "Agents":
+            self._agents_cache_time = 0
+        if sheet_name == "Settings":
+            self._settings_cache_time = 0
+
         return len(ws.get_all_values())
 
     def update_row_by_match(
@@ -82,13 +95,26 @@ class GoogleSheetsService:
             if key in headers:
                 col_index = headers.index(key) + 1
                 ws.update_cell(row_index, col_index, value)
+
+        if sheet_name == "Agents":
+            self._agents_cache_time = 0
+        if sheet_name == "Settings":
+            self._settings_cache_time = 0
+
         return True
 
     def get_setting(self, key: str) -> str:
-        row = self.find_one("Settings", "key", key)
-        if not row:
-            return ""
-        return str(row.get("value", "")).strip()
+        now = time.time()
+
+        if now - self._settings_cache_time > 60:
+            rows = self.get_all_records("Settings")
+            self._settings_cache = {
+                str(row.get("key", "")).strip(): str(row.get("value", "")).strip()
+                for row in rows
+            }
+            self._settings_cache_time = now
+
+        return self._settings_cache.get(key, "")
 
     def upsert_user(
         self,
@@ -148,16 +174,21 @@ class GoogleSheetsService:
             self.append_row_by_headers("Agents", payload)
 
     def get_active_agents(self) -> list[dict[str, Any]]:
-        rows = self.get_all_records("Agents")
-        result = []
-        for row in rows:
-            if (
-                str(row.get("is_active", "")).upper() == "TRUE"
-                and str(row.get("can_take_leads", "")).upper() == "TRUE"
-                and str(row.get("tg_id", "")).isdigit()
-            ):
-                result.append(row)
-        return result
+        now = time.time()
+
+        if now - self._agents_cache_time > 30:
+            rows = self.get_all_records("Agents")
+            self._agents_cache = [
+                row for row in rows
+                if (
+                    str(row.get("is_active", "")).upper() == "TRUE"
+                    and str(row.get("can_take_leads", "")).upper() == "TRUE"
+                    and str(row.get("tg_id", "")).isdigit()
+                )
+            ]
+            self._agents_cache_time = now
+
+        return self._agents_cache
 
     def next_lead_id(self) -> str:
         rows = self.get_all_records("Leads")
@@ -209,7 +240,6 @@ class GoogleSheetsService:
                 "notes": notes,
             },
         )
-
         return lead_id
 
 
