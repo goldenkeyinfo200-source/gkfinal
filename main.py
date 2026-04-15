@@ -58,6 +58,10 @@ def normalize_phone(phone: str) -> str:
     return "".join(ch for ch in phone if ch.isdigit() or ch == "+")
 
 
+def text_endswith(message_text: str | None, value: str) -> bool:
+    return (message_text or "").strip().endswith(value)
+
+
 def detect_role(tg_id: int) -> str:
     if tg_id in settings.admins:
         return "admin"
@@ -313,7 +317,7 @@ async def agent_request_command(message: Message):
         asyncio.create_task(send_agent_request_to_admins(message.from_user))
 
 
-@dp.message(F.text == "🧑‍💼 Агент бўлиш")
+@dp.message(F.text.func(lambda t: text_endswith(t, "Агент бўлиш")))
 async def agent_request_button(message: Message):
     role = ensure_user_exists(message.from_user)
     if role in {"admin", "agent", "special_agent"}:
@@ -327,7 +331,7 @@ async def agent_request_button(message: Message):
         asyncio.create_task(send_agent_request_to_admins(message.from_user))
 
 
-@dp.message(F.text == "➕ Агент қўшиш")
+@dp.message(F.text.func(lambda t: text_endswith(t, "Агент қўшиш")))
 async def add_agent_menu_handler(message: Message):
     role = ensure_user_exists(message.from_user)
     if role != "admin":
@@ -345,14 +349,14 @@ async def add_agent_menu_handler(message: Message):
     )
 
 
-@dp.message(F.text == "📝 Заявка қолдириш")
+@dp.message(F.text.func(lambda t: text_endswith(t, "Заявка қолдириш")))
 async def request_handler(message: Message, state: FSMContext):
     ensure_user_exists(message.from_user)
     await state.set_state(LeadForm.full_name)
     await message.answer("Исмингизни киритинг:", reply_markup=ReplyKeyboardRemove())
 
 
-@dp.message(F.text == "🏠 Объект қўшиш")
+@dp.message(F.text.func(lambda t: text_endswith(t, "Объект қўшиш")))
 async def add_property_handler(message: Message):
     role = detect_role(message.from_user.id)
     touch_user_if_exists(message.from_user)
@@ -367,7 +371,7 @@ async def add_property_handler(message: Message):
     )
 
 
-@dp.message(F.text == "📊 Админ статистика")
+@dp.message(F.text.func(lambda t: text_endswith(t, "Админ статистика")))
 async def stats_handler(message: Message):
     role = detect_role(message.from_user.id)
     touch_user_if_exists(message.from_user)
@@ -686,6 +690,8 @@ async def contract_handler(callback: CallbackQuery):
 async def fallback_message_handler(message: Message, state: FSMContext):
     role = detect_role(message.from_user.id)
     touch_user_if_exists(message.from_user)
+
+    logger.info("Unhandled message text: %r", message.text)
 
     await state.clear()
     await message.answer(
