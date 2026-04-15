@@ -438,23 +438,17 @@ async def purpose_handler(message: Message, state: FSMContext):
     )
 
 
-@dp.message(LeadForm.notes)
-async def notes_handler(message: Message, state: FSMContext):
-    data = await state.get_data()
+@dp.message(CommandStart())
+async def start_handler(message: Message, state: FSMContext):
+    await state.clear()
 
-    full_name = data.get("full_name") or message.from_user.full_name
-    phone = data.get("phone", "")
-    purpose = data.get("purpose", "")
-    notes = (message.text or "").strip()
-    username = normalize_username(message.from_user.username)
     role = ensure_user_exists(message.from_user)
 
-    sheets.upsert_user(
-        tg_id=message.from_user.id,
-        full_name=full_name,
-        phone=phone,
-        username=username,
-        role="client" if role == "client" else role,
+    await message.answer(
+        f"🏠 <b>{settings.company_name}</b>\n\n"
+        f"Салом, {message.from_user.full_name}!\n"
+        f"Менюдан танланг 👇",
+        reply_markup=main_menu(role)
     )
 
     lead_id = sheets.create_lead(
