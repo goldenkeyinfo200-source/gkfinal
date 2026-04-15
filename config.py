@@ -1,5 +1,5 @@
-import os
 import json
+import os
 
 
 class Settings:
@@ -7,14 +7,17 @@ class Settings:
         self.bot_token = os.getenv("BOT_TOKEN", "").strip()
         self.base_webhook_url = os.getenv("BASE_WEBHOOK_URL", "").rstrip("/")
         self.webhook_secret = os.getenv("WEBHOOK_SECRET", "").strip()
+
         self.google_sheet_id = os.getenv("GOOGLE_SHEET_ID", "").strip()
         self.google_credentials_raw = os.getenv("GOOGLE_CREDENTIALS", "").strip()
+
         self.admins = [
             int(x.strip())
             for x in os.getenv("ADMINS", "").split(",")
             if x.strip().isdigit()
         ]
-        self.company_name = os.getenv("COMPANY_NAME", "Golden Key").strip()
+
+        self.company_name = os.getenv("COMPANY_NAME", "Golden Key info").strip()
         self.contact_phone = os.getenv("CONTACT_PHONE", "").strip()
 
     @property

@@ -2,25 +2,25 @@ import asyncio
 import logging
 from contextlib import suppress
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    Message,
     CallbackQuery,
-    ReplyKeyboardMarkup,
     KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import settings
-from services.sheets import sheets, now_str
+from services.sheets import now_str, sheets
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -90,10 +90,7 @@ def main_menu(role: str = "client") -> ReplyKeyboardMarkup:
 
     rows.append([KeyboardButton(text=f"📞 Алоқа: {settings.contact_phone}")])
 
-    return ReplyKeyboardMarkup(
-        keyboard=rows,
-        resize_keyboard=True,
-    )
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
 def phone_keyboard() -> ReplyKeyboardMarkup:
@@ -210,7 +207,6 @@ async def send_agent_request_to_admins(user: types.User):
         f"🆔 <code>{user.id}</code>\n"
         f"🔗 {normalize_username(user.username) or '-'}"
     )
-
     tasks = [
         bot.send_message(admin_id, text, reply_markup=agent_request_kb(user.id))
         for admin_id in settings.admins
@@ -710,7 +706,6 @@ async def on_startup():
     logger.info("App starting...")
     logger.info("Webhook path: %s", settings.webhook_path)
     logger.info("Webhook url: %s", settings.webhook_url)
-
     try:
         await bot.set_webhook(settings.webhook_url)
         logger.info("Webhook set successfully")
